@@ -1,0 +1,999 @@
+---
+title: "Regression"
+author: "Kuanyu Lai"
+date: "2024-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE, warning = FALSE)
+```
+
+
+## Regression 
+
+```{r}
+library(tidymodels)
+library(tidyverse)
+library(doParallel)
+registerDoParallel(makeCluster(4))
+```
+
+### Import Dataset
+
+```{r}
+dfii <- read_csv("dfii.csv", col_names = TRUE )
+
+glimpse(dfii)
+```
+
+### Transform Response
+
+```{r}
+dfii <- dfii %>% 
+  mutate(
+    Lightness = factor(Lightness, ordered = FALSE),
+    Saturation = factor(Saturation, ordered = FALSE)) |> 
+    select(-outcome)
+
+str(dfii)
+```
+
+### Baseline models
+```{r}
+lm_intercept <- lm(y~1, data = dfii)
+
+lm_cat <- lm(y ~ Saturation+Lightness, data = dfii)
+
+lm_con <- lm(y~R+G+B+Hue, data = dfii)
+
+lm_all <- lm(y~., data = dfii)
+
+lm_inter1 <- lm(y ~ (Saturation+Lightness)^2+R+G+B+Hue, data = dfii)
+
+lm_inter2 <- lm(y~ Saturation+Lightness+(Hue+R+G+B)^2, data = dfii)
+
+lm_inter3 <- lm(y~ (Saturation+Lightness)*(R+G+B+Hue)+(R+G+B+Hue)^2, data = dfii)
+
+lm_non_lin1 <- lm(y~ (G+I(G^2)):Lightness,data = dfii)
+
+lm_non_lin2 <- lm(y~ R+I(R^2)+G+I(G^2)+B+I(B^2),data = dfii)
+
+lm_non_lin_inter <- lm(y~ (R + I(R^2) + G + I(G^2)) * Lightness,data = dfii)
+
+```
+
+### Evaluation of baseline models
+
+```{r}
+model_list <- list(lm_intercept, lm_cat,lm_con,lm_all,lm_inter1,lm_inter2,lm_inter3,lm_non_lin1,lm_non_lin2,lm_non_lin_inter)  
+adj_r_squared <- numeric(length(model_list))
+model_names <- character(length(model_list))
+
+for (i in seq_along(model_list)) {
+  summary_info <- summary(model_list[[i]])
+  adj_r_squared[i] <- summary_info$adj.r.squared
+  model_names[i] <- paste("Model", i)
+}
+
+results_df <- tibble(Model = model_names, `Adjusted R-squared` = adj_r_squared)
+
+
+results_df |> 
+  arrange(desc(adj_r_squared))
+```
+
+```{r}
+rmse_values <- numeric(length(model_list))
+for (i in seq_along(model_list)) {
+  predictions <- predict(model_list[[i]], newdata = dfii)
+  rmse_values[i] <- sqrt(mean((predictions - dfii$y)^2))
+}
+results_df <- tibble(Model = paste("Model", 1:length(model_list)), RMSE = rmse_values)
+
+results_df |> 
+  arrange(RMSE)
+
+```
+
+
+```{r}
+bic_values <- numeric(length(model_list))
+for (i in seq_along(model_list)) {
+
+  bic_values[i] <- BIC(model_list[[i]])
+}
+results_df <- tibble(Model = paste("Model", 1:length(model_list)), BIC = bic_values)
+
+results_df |> 
+  arrange(BIC)
+```
+
+```{r}
+coefplot::coefplot(lm_non_lin_inter)
+```
+
+
+```{r}
+coefplot::coefplot(lm_inter3)
+```
+
+
+```{r}
+coefplot::coefplot(lm_inter2)
+```
+
+The complexity of three model is pretty different so cannot really compare, but fropm the metrics, although the polynomial is way less complex than opther two, the performance is very similar.
+
+From the output, the three continuous variable look very important, as well as lightness by looking at the interactions.
+
+
+## Bayesian linear model
+
+The best model according to metrics is lm_inter3 and another model I choose would be polynomial on all R G B with interaction with lightness because it is less complex and similar performance
+
+```{r}
+lm_inter3_matrix <- model.matrix(formula(lm_inter3), data = dfii)
+lm_inter2_matrix <- model.matrix(formula(lm_inter2), data = dfii)
+
+info_inter3 <- list(
+  yobs = dfii$y,
+  design_matrix = lm_inter3_matrix,
+  mu_beta = 0,
+  tau_beta = 2,
+  sigma_rate = 1
+)
+
+info_inter2 <- list(
+  yobs = dfii$y,
+  design_matrix = lm_inter2_matrix,
+  mu_beta = 0,
+  tau_beta = 2,
+  sigma_rate = 1
+)
+```
+
+```{r}
+lm_logpost <- function(unknowns, my_info)
+{
+  # specify the number of unknown beta parameters
+  length_beta <- ncol(my_info$design_matrix)
+  # extract the beta parameters from the `unknowns` vector
+  beta_v <- unknowns[1:length_beta]
+  # extract the unbounded noise parameter, varphi
+  lik_varphi <- unknowns[length_beta + 1]
+  # back-transform from varphi to sigma
+  lik_sigma <- exp(lik_varphi)
+  # extract design matrix
+  X <- my_info$design_matrix
+  # calculate the linear predictor
+  mu <- as.vector( X %*% as.matrix(beta_v) )
+  # evaluate the log-likelihood
+  log_lik <- sum(dnorm(x = my_info$yobs,
+                       mean = mu,
+                       sd = lik_sigma,
+                       log = TRUE))
+  # evaluate the log-prior
+  log_prior_beta <- sum(dnorm(x = beta_v,
+                              mean = my_info$mu_beta,
+                              sd = my_info$tau_beta,
+                              log = TRUE)) 
+  
+  log_prior_sigma <- dexp(x = lik_sigma,
+                          rate = my_info$sigma_rate,
+                          log = TRUE)
+  
+  # add the mean trend prior and noise prior together
+  log_prior <- log_prior_beta + log_prior_sigma
+  
+  # account for the transformation
+  log_derive_adjust <- lik_varphi
+  
+  # sum together
+  log_lik + log_prior + log_derive_adjust
+}
+```
+
+
+```{r}
+my_laplace <- function(start_guess, logpost_func, ...)
+{
+  # code adapted from the `LearnBayes`` function `laplace()`
+  fit <- optim(start_guess,
+               logpost_func,
+               gr = NULL,
+               ...,
+               method = "BFGS",
+               hessian = TRUE,
+               control = list(fnscale = -1, maxit = 1001))
+  
+  mode <- fit$par
+  post_var_matrix <- -solve(fit$hessian)
+  p <- length(mode)
+  int <- p/2 * log(2 * pi) + 0.5 * log(det(post_var_matrix)) + logpost_func(mode, ...)
+  # package all of the results into a list
+  list(mode = mode,
+       var_matrix = post_var_matrix,
+       log_evidence = int,
+       converge = ifelse(fit$convergence == 0,
+                         "YES", 
+                         "NO"),
+       iter_counts = as.numeric(fit$counts[1]))
+}
+```
+
+```{r}
+laplace_quad_inter3 <- my_laplace(rep(0, ncol(lm_inter3_matrix)+1), lm_logpost, info_inter3)
+laplace_quad_inter2 <- my_laplace(rep(0, ncol(lm_inter2_matrix)+1), lm_logpost, info_inter2)
+```
+
+```{r}
+generate_lm_post_samples <- function(mvn_result, length_beta, num_samples)
+{
+  MASS::mvrnorm(n = num_samples,
+                mu = mvn_result$mode ,
+                Sigma = mvn_result$var_matrix ) %>% 
+    as.data.frame() %>% tibble::as_tibble() %>% 
+    purrr::set_names(c(sprintf("beta_%02d", 0:(length_beta-1)), "varphi")) %>% 
+    mutate(sigma = exp(varphi))
+}
+```
+
+```{r}
+set.seed(87123)
+
+post_samples_inter3 <- generate_lm_post_samples(laplace_quad_inter3, ncol(lm_inter3_matrix), 2500)
+
+post_samples_inter3 %>% 
+  ggplot(mapping = aes(x = sigma)) +
+  labs(title = "Posterior uncertainty of inter3" )+
+  geom_histogram(bins = 55) +
+  theme_bw()
+```
+
+
+```{r}
+post_samples_inter2 <- generate_lm_post_samples(laplace_quad_inter2, ncol(lm_inter2_matrix), 2500)
+
+post_samples_inter2 %>% 
+  ggplot(mapping = aes(x = sigma)) +
+  labs(title = "Posterior uncertainty of inter2" )+
+  geom_histogram(bins = 55) +
+  theme_bw()
+```
+
+```{r}
+sigma(lm_inter3)
+```
+
+
+```{r}
+sigma(lm_inter2)
+```
+
+```{r}
+viz_post_coefs <- function(post_means, post_sds, xnames)
+{
+  tibble::tibble(
+    mu = post_means,
+    sd = post_sds,
+    x = xnames
+  ) %>% 
+    mutate(x = factor(x, levels = xnames)) %>% 
+    ggplot(mapping = aes(x = x)) +
+    geom_hline(yintercept = 0, color = 'grey', linetype = 'dashed') +
+    geom_point(mapping = aes(y = mu)) +
+    geom_linerange(mapping = aes(ymin = mu - 2 * sd,
+                                 ymax = mu + 2 * sd,
+                                 group = x)) +
+    labs(x = 'feature', y = 'coefficient value') +
+    coord_flip() +
+    theme_bw()
+}
+```
+
+
+```{r}
+viz_post_coefs(laplace_quad_inter3$mode[1:length(laplace_quad_inter3$mode)-1],
+               sqrt(diag(laplace_quad_inter3$var_matrix[1:length(laplace_quad_inter3$mode)-1,1:length(laplace_quad_inter3$mode)-1])),
+               colnames(lm_inter3_matrix))
+```
+
+```{r}
+viz_post_coefs(laplace_quad_inter2$mode[1:length(laplace_quad_inter2$mode)-1],
+               sqrt(diag(laplace_quad_inter2$var_matrix[1:length(laplace_quad_inter2$mode)-1,1:length(laplace_quad_inter2$mode)-1])),
+               colnames(lm_inter2_matrix))
+```
+
+```{r}
+log_evidence_inter3 <- laplace_quad_inter3$log_evidence
+log_evidence_inter2 <- laplace_quad_inter2$log_evidence
+
+bayes_factor <- round(exp(log_evidence_inter3) / exp(log_evidence_inter2),5)
+
+bayes_factor
+```
+
+
+```{r}
+reference_values <- tibble(
+  G = median(dfii$G),  
+  B = median(dfii$B),  
+  Hue = median(dfii$Hue),  
+  Saturation = "neutral"
+)
+
+viz_grid <- expand.grid(R = seq(0, 255, length.out = 255 ),
+                        G = reference_values$G,
+                        B = reference_values$B,
+                        Hue = reference_values$Hue,
+                        Lightness = c("dark","deep","light","midtone","pale","saturated","soft"),
+                        Saturation = factor(reference_values$Saturation, levels = levels(dfii$Saturation)),
+                        KEEP.OUT.ATTRS = FALSE,
+                        stringsAsFactors = FALSE
+                    ) %>% 
+  as.data.frame() %>% tibble::as_tibble()
+  
+```
+
+```{r}
+generate_lm_post_samples <- function(mvn_result, length_beta, num_samples)
+{
+  MASS::mvrnorm(n = num_samples,
+                mu = mvn_result$mode,
+                Sigma = mvn_result$var_matrix) %>% 
+    as.data.frame() %>% tibble::as_tibble() %>% 
+    purrr::set_names(c(sprintf("beta_%02d", 0:(length_beta-1)), "varphi")) %>% 
+    mutate(sigma = exp(varphi))
+}
+
+
+post_lm_pred_samples <- function(Xnew, Bmat, sigma_vector)
+{
+  # number of new prediction locations
+  M <- nrow(Xnew)
+  # number of posterior samples
+  S <- nrow(Bmat)
+  
+  # matrix of linear predictors
+  Umat <- as.matrix(Xnew %*% t(Bmat))
+  
+  # assmeble matrix of sigma samples, set the number of rows
+  Rmat <- matrix(rep(sigma_vector, M), nrow = M, byrow = TRUE)
+  
+  # generate standard normal and assemble into matrix
+  # set the number of rows
+  Zmat <- matrix(rnorm(M*S), nrow = M, byrow = TRUE)
+  
+  # calculate the random observation predictions
+  Ymat <- Umat + Rmat * Zmat
+  
+  # package together
+  list(Umat = Umat, Ymat = Ymat)
+}
+
+make_post_lm_pred <- function(Xnew, post)
+{
+  Bmat <- post %>% select(starts_with("beta_")) %>% as.matrix()
+  
+  sigma_vector <- post %>% pull(sigma)
+  
+  post_lm_pred_samples(Xnew, Bmat, sigma_vector)
+}
+
+
+summarize_lm_pred_from_laplace <- function(mvn_result, Xtest, num_samples)
+{
+  # generate posterior samples of the beta parameters
+  post <- generate_lm_post_samples(mvn_result, ncol(Xtest), num_samples)
+  
+  # make posterior predictions on the test set
+  pred_test <- make_post_lm_pred(Xtest, post)
+  
+  # calculate summary statistics on the predicted mean and response
+  # summarize over the posterior samples
+  
+  # posterior mean, should you summarize along rows (rowMeans) or 
+  # summarize down columns (colMeans) ???
+  mu_avg <- rowMeans(pred_test$Umat)
+  y_avg <- rowMeans(pred_test$Ymat)
+  
+  # posterior quantiles for the middle 95% uncertainty intervals
+  mu_lwr <- apply(pred_test$Umat, 1, stats::quantile, probs = 0.025)
+  mu_upr <- apply(pred_test$Umat, 1, stats::quantile, probs = 0.975)
+  y_lwr <- apply(pred_test$Ymat, 1, stats::quantile, probs = 0.025)
+  y_upr <- apply(pred_test$Ymat, 1, stats::quantile, probs = 0.975)
+  
+  # book keeping
+  tibble::tibble(
+    mu_avg = mu_avg,
+    mu_lwr = mu_lwr,
+    mu_upr = mu_upr,
+    y_avg = y_avg,
+    y_lwr = y_lwr,
+    y_upr = y_upr
+  ) %>% 
+    tibble::rowid_to_column("pred_id")
+}
+
+```
+
+
+```{r}
+inter3_test <- model.matrix(~ (Saturation + Lightness) * (R + G + B + Hue) + (R + G + B + Hue)^2, data = viz_grid)
+
+post_pred_summary_viz_inter3 <- summarize_lm_pred_from_laplace(laplace_quad_inter3, inter3_test, num_samples = 1000)
+
+post_pred_summary_viz_inter3 %>% 
+  left_join(viz_grid %>% tibble::rowid_to_column("pred_id"),
+            by = 'pred_id') |> 
+  ggplot(aes(x = R, y = mu_avg, ymin = mu_lwr, ymax = mu_upr, fill = as.factor(Lightness))) +
+  geom_ribbon(alpha = 0.5) +
+  geom_line() +
+  labs(title = "Posterior Predictions - Model 3 with Weak Prior",
+       x = "x1",
+       y = "Predicted Response") +
+  theme_minimal()
+```
+
+
+```{r}
+inter2_test <- model.matrix(~ Saturation + Lightness + (Hue + R + G + B)^2, data = viz_grid)
+
+post_pred_summary_viz_inter2 <- summarize_lm_pred_from_laplace(laplace_quad_inter2, inter2_test, num_samples = 1000)
+
+post_pred_summary_viz_inter2 %>% 
+  left_join(viz_grid %>% tibble::rowid_to_column("pred_id"),
+            by = 'pred_id') |> 
+  ggplot(aes(x = R, y = mu_avg, ymin = mu_lwr, ymax = mu_upr, fill = as.factor(Lightness))) +
+  geom_ribbon(alpha = 0.5) +
+  geom_line() +
+  labs(title = "Posterior Predictions - Model 3 with Weak Prior",
+       x = "x1",
+       y = "Predicted Response") +
+  theme_minimal()
+```
+
+## Complex models
+
+### linear models
+
+```{r}
+lm_mod <- 
+  linear_reg() |> set_engine("lm") 
+
+#All categorical and continuous inputs - linear additive features
+lm_fit <- 
+  lm_mod %>% 
+  fit(y ~ ., data = dfii)
+
+#Add categorical inputs to all main effect and all pairwise interactions of continuous inputs
+lm_fit_con_inter <- 
+  lm_mod %>% 
+  fit(y ~Saturation+Lightness+(R+B+G+Hue)^2, data = dfii)
+
+#lm_inter3
+lm_fit_inter3 <- 
+  lm_mod %>% 
+  fit(formula(lm_inter3), data = dfii)
+
+lm_fit_nonlin <- 
+  lm_mod %>% 
+  fit(formula(lm_non_lin1), data = dfii)
+
+```
+
+```{r}
+lm_fit_metrics <- lm_fit %>%
+  predict(new_data = dfii) |> 
+  bind_cols(dfii) |> 
+  metrics(truth = y, estimate = .pred) |> 
+  select(.metric,.estimate)
+
+lm_fit_con_inter_metrics <- lm_fit_con_inter %>%
+  predict(new_data = dfii) %>%
+  bind_cols(dfii) %>%
+  metrics(truth = y, estimate = .pred) %>%
+  select(.metric, .estimate) 
+
+lm_fit_inter3_metrics <- lm_fit_inter3 %>%
+  predict(new_data = dfii) %>%
+  bind_cols(dfii) %>%
+  metrics(truth = y, estimate = .pred) %>%
+  select(.metric, .estimate)
+
+lm_fit_nonlin_metrics <- lm_fit_nonlin %>%
+  predict(new_data = dfii) %>%
+  bind_cols(dfii) %>%
+  metrics(truth = y, estimate = .pred) %>%
+  select(.metric, .estimate) 
+
+all_metrics <- bind_rows(
+  lm_fit_metrics %>% mutate(model = "lm_fit"),
+  lm_fit_con_inter_metrics %>% mutate(model = "lm_fit_con_inter"),
+  lm_fit_inter3_metrics %>% mutate(model = "lm_fit_inter3"),
+  lm_fit_nonlin_metrics %>% mutate(model = "lm_fit_nonlin")
+)
+
+metrics_table <- all_metrics %>%
+  pivot_wider(names_from = .metric, values_from = .estimate)
+metrics_table
+```
+
+### Elastic nets
+```{r}
+#categorical inputs to all main effect and all pairwise interactions of continuous inputs
+regularize_rec1 <-
+  recipe(y ~ R+G+B+Hue+Saturation+Lightness,data = dfii) |> 
+  step_dummy(all_nominal_predictors()) |>
+  step_interact(terms = ~ (R+G+B)^2) |> 
+  step_center(all_numeric_predictors())
+
+elastic1_prep <- prep(regularize_rec1)
+
+glmn_fit <- 
+  linear_reg(penalty = tune(), mixture  = 0.5) %>% 
+  set_engine("glmnet") |> 
+  set_mode("regression")
+
+regularize1_wf <- 
+  workflow() |> 
+  add_recipe(regularize_rec1) |> 
+  add_model(glmn_fit)
+
+#lm_inter3
+regularize_rec2 <- 
+  recipe(y ~ R+G+B+Lightness+Saturation+ Hue,data = dfii) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_interact(terms = ~ all_numeric_predictors():starts_with("Lightness_") +
+                  all_numeric_predictors():starts_with("Saturation_")) |> 
+  step_interact(~(R+G+B+Hue):(R+G+B+Hue)) |> 
+  step_center(all_numeric_predictors())
+
+elastic2_prep <- prep(regularize_rec2) 
+
+regularize2_wf <- 
+  workflow() |> 
+  add_recipe(regularize_rec2) |> 
+  add_model(glmn_fit)
+```
+
+### Tuning Elastic Nets
+```{r}
+set.seed(132)
+tidy_kfold <- vfold_cv(dfii, v = 5, repeats = 5)
+
+elastic_info <- extract_parameter_set_dials(glmn_fit)
+
+#Create tune grid for models
+elastic_grid <- grid_regular(elastic_info, levels = 15)
+
+regularize_tune1 <- tune_grid(regularize1_wf,
+                              resamples = tidy_kfold,
+                              grid = elastic_grid)
+
+regularize_tune2 <- tune_grid(regularize2_wf,
+                              resamples = tidy_kfold,
+                              grid = elastic_grid)
+```
+
+
+```{r}
+(show_best(regularize_tune1))
+(show_best(regularize_tune2))
+```
+
+
+### Neural Network
+
+```{r}
+nn_recipe <- 
+  recipe(y ~R+G+B+Lightness+Saturation+ Hue,data = dfii) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_normalize(all_numeric_predictors()) 
+
+
+nn_spec <- 
+  mlp(epochs = tune(), hidden_units = tune(), penalty = tune(), activation = "tanh") |> 
+  set_engine("nnet", verbose = FALSE) |> 
+  set_mode("regression")
+
+nn_workflow <- 
+  workflow() |> 
+  add_recipe(nn_recipe) |> 
+  add_model(nn_spec)
+```
+
+### Tuning NN
+```{r}
+set.seed(267)
+nn_info <- extract_parameter_set_dials(nn_spec)
+
+nn_grid <- grid_regular(nn_info, levels = 4)
+
+nn_tune <- tune_grid(nn_workflow,
+                     resamples = tidy_kfold,
+                     grid = nn_grid)
+
+show_best(nn_tune)[1,]
+```
+
+### Save best model
+```{r}
+final_nn <- nn_workflow |> 
+  finalize_workflow(select_best(nn_tune, metric= "rmse")) |> 
+  fit(dfii)
+
+class(final_nn)
+```
+
+
+### Random forest
+```{r}
+rf_rec <- 
+  recipe(y~R+G+B+Lightness+Saturation+ Hue, data = dfii) 
+
+rf_fit <- rand_forest(mtry = tune(), trees = 1000, min_n = tune()) |> 
+  set_mode("regression") |> 
+  set_engine("ranger")
+
+rf_wf <- 
+  workflow() |> 
+  add_recipe(rf_rec) |> 
+  add_model(rf_fit)
+```
+
+### Tune rf
+```{r}
+set.seed(976)
+
+rf_info <- extract_parameter_set_dials(rf_fit) |> finalize(dfii)
+
+ranger_tune <-
+  tune_grid(rf_wf,
+            resamples =tidy_kfold,
+            param_info = rf_info,
+            grid = 10)
+show_best(ranger_tune, metric = "rmse")[1,]
+```
+
+```{r}
+autoplot(ranger_tune)
+```
+```{r}
+final_rf <- rf_wf |> 
+  finalize_workflow(select_best(ranger_tune, metric= "rmse")) |> 
+  fit(dfii)
+
+class(final_rf)
+```
+
+### Gradient Boosted Tree
+```{r}
+xgboost_recipe <- 
+  recipe(formula = y ~ R + G + B + Lightness + Saturation + Hue, data = dfii) %>% 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) 
+
+xgboost_spec <- 
+  boost_tree(learn_rate = tune(),loss_reduction = tune(), trees = 500) %>% 
+  set_mode("regression") %>% 
+  set_engine("xgboost") 
+
+xgboost_workflow <- 
+  workflow() %>% 
+  add_recipe(xgboost_recipe) %>% 
+  add_model(xgboost_spec) 
+```
+
+### tune Boosted Tree
+
+```{r}
+set.seed(154)
+
+xgb_grid <- grid_regular(parameters(xgboost_spec), levels = 5)
+
+xgb_tune <-
+  tune_grid(xgboost_workflow,
+            resamples =tidy_kfold,
+            grid = xgb_grid)
+
+show_best(xgb_tune)
+```
+
+### SVM
+
+```{r}
+kernlab_recipe <- 
+  recipe(formula = y ~ R + G + B + Lightness + Saturation + Hue, data = dfii) %>% 
+  step_dummy(all_nominal_predictors()) |> 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) 
+
+kernlab_spec <- 
+  svm_poly(cost = tune(), degree = tune(), scale_factor = tune()) %>% 
+  set_mode("regression") 
+
+
+kernlab_workflow <- 
+  workflow() %>% 
+  add_recipe(kernlab_recipe) %>% 
+  add_model(kernlab_spec) 
+
+```
+
+### Tune svm
+
+```{r}
+model_metric <- metric_set(rmse)
+svm_grid <- grid_regular(parameters(kernlab_spec), levels = 5)
+
+set.seed(54900)
+kernlab_tune <-
+  tune_grid(kernlab_workflow, resamples =tidy_kfold , grid = svm_grid, metrics = model_metric)
+
+```
+
+```{r}
+autoplot(kernlab_tune)
+```
+
+```{r}
+show_best(kernlab_tune, metric = "rmse")[1,]
+```
+
+```{r}
+final_svm <- kernlab_workflow |> 
+  finalize_workflow(select_best(kernlab_tune, metric= "rmse")) |> 
+  fit(dfii)
+```
+
+
+### KNN
+```{r}
+kknn_recipe <- 
+  recipe(formula = y ~ R + G + B + Lightness + Saturation + Hue, data = dfii) %>% 
+  step_zv(all_predictors()) %>% 
+  step_normalize(all_numeric_predictors()) |> 
+  step_dummy(all_nominal_predictors())
+
+
+kknn_spec <- 
+  nearest_neighbor(neighbors = tune(), weight_func = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("kknn") 
+
+kknn_workflow <- 
+  workflow() %>% 
+  add_recipe(kknn_recipe) %>% 
+  add_model(kknn_spec) 
+```
+
+### Tune KNN
+
+```{r}
+knn_info <- extract_parameter_set_dials(kknn_spec)
+
+knn_grid <- grid_regular(knn_info, levels = 5)
+
+set.seed(89162)
+kknn_tune <-
+  tune_grid(kknn_workflow, resamples = tidy_kfold, grid = knn_grid)
+```
+
+```{r}
+autoplot(kknn_tune)
+```
+
+```{r}
+show_best(kknn_tune)
+```
+
+```{r}
+final_knn <- kknn_workflow |> 
+  finalize_workflow(select_best(kknn_tune, metric= "rmse"))
+```
+
+
+### save the best model for prediction
+
+From the cross validation, the neural network has the ebst results among all the other models, so we will use neural network as our prediction model.
+
+```{r}
+library(bundle)
+
+final_nn <- bundle(final_nn)
+
+final_nn |> readr::write_rds("nn_reg.rds")
+
+final_nn <- unbundle(final_nn)
+```
+
+
+## Variable Importance
+
+### Local Explanation
+```{r}
+library(DALEXtra)
+vip_features <- c("R", "G", "B", 
+                  "Hue", "Saturation", "Lightness")
+
+
+explainer_nn <- 
+  explain_tidymodels(
+    final_nn, 
+    data = dfii, 
+    y = dfii$y,
+    label = "neural network",
+    verbose = FALSE
+  )
+```
+
+```{r}
+duplex <- dfii[120,]
+duplex
+```
+```{r}
+nn_breakdown <- predict_parts(explainer = explainer_nn, new_observation = duplex)
+nn_breakdown
+```
+```{r}
+predict_parts(
+  explainer = explainer_nn, 
+  new_observation = duplex,
+  order = nn_breakdown$variable_name
+)
+```
+```{r}
+set.seed(1801)
+
+shap_duplex <- 
+  predict_parts(
+    explainer = explainer_nn, 
+    new_observation = duplex, 
+    type = "shap",
+    B = 20
+  )
+```
+
+```{r}
+library(forcats)
+shap_duplex %>%
+  group_by(variable) %>%
+  mutate(mean_val = mean(contribution)) %>%
+  ungroup() %>%
+  mutate(variable = fct_reorder(variable, abs(mean_val))) %>%
+  ggplot(aes(contribution, variable, fill = mean_val > 0)) +
+  geom_col(data = ~distinct(., variable, mean_val), 
+           aes(mean_val, variable), 
+           alpha = 0.5) +
+  geom_boxplot(width = 0.5) +
+  theme(legend.position = "none") +
+  scale_fill_viridis_d() +
+  labs(y = NULL)
+```
+
+### Global Explanation
+
+```{r}
+set.seed(1804)
+vip_nn <- model_parts(explainer_nn, loss_function = loss_root_mean_square)
+```
+
+
+```{r}
+ggplot_imp <- function(...) {
+  obj <- list(...)
+  metric_name <- attr(obj[[1]], "loss_name")
+  metric_lab <- paste(metric_name, 
+                      "after permutations\n(higher indicates more important)")
+  
+  full_vip <- bind_rows(obj) %>%
+    filter(variable != "_baseline_")
+  
+  perm_vals <- full_vip %>% 
+    filter(variable == "_full_model_") %>% 
+    group_by(label) %>% 
+    summarise(dropout_loss = mean(dropout_loss))
+  
+  p <- full_vip %>%
+    filter(variable != "_full_model_") %>% 
+    mutate(variable = fct_reorder(variable, dropout_loss)) %>%
+    ggplot(aes(dropout_loss, variable)) 
+  if(length(obj) > 1) {
+    p <- p + 
+      facet_wrap(vars(label)) +
+      geom_vline(data = perm_vals, aes(xintercept = dropout_loss, color = label),
+                 linewidth = 1.4, lty = 2, alpha = 0.7) +
+      geom_boxplot(aes(color = label, fill = label), alpha = 0.2)
+  } else {
+    p <- p + 
+      geom_vline(data = perm_vals, aes(xintercept = dropout_loss),
+                 linewidth = 1.4, lty = 2, alpha = 0.7) +
+      geom_boxplot(fill = "#91CBD765", alpha = 0.4)
+    
+  }
+  p +
+    theme(legend.position = "none") +
+    labs(x = metric_lab, 
+         y = NULL,  fill = NULL,  color = NULL)
+}
+```
+
+
+```{r}
+ggplot_imp(vip_nn)
+```
+
+
+For variable importance, I choose to use SHAP value to evaluate how each variable contribute to the model, SHAP value is used in machine learning to explain individual predictions. Originating from game theory, SHAP values measure the contribution of each feature to a prediction relative to an average baseline. This is done by considering all possible combinations of features and calculating the change in the prediction when a feature is added. The result is a fair distribution of the prediction's attribution among all the features. Based on the plot, the color paints really help predict the popular paints.
+
+
+##  Input insights
+
+### Hardest and easiest to predict 
+```{r}
+
+predictions <- predict(final_nn, new_data = dfii) %>%
+  bind_cols(dfii) %>%
+  mutate(error = abs(y - .pred))
+
+average_error_by_group <- predictions %>%
+  group_by(Lightness, Saturation) %>%
+  summarise(AverageError = mean(error))
+
+easiest_reg <- average_error_by_group[which.min(average_error_by_group$AverageError),]
+hardest_reg <- average_error_by_group[which.max(average_error_by_group$AverageError),]
+
+easiest_reg
+hardest_reg
+```
+
+### Prediction
+```{r}
+values <- expand.grid(R = seq(min(dfii$R), max(dfii$R), length.out = 101),
+                      G = seq(min(dfii$G), max(dfii$G), length.out = 101))
+values$B <- median(dfii$B)
+values$Hue <- median(dfii$Hue)
+values$Saturation <- "gray"
+values$Lightness <- "light"
+```
+
+
+```{r}
+reg_predictions_easy <- predict(final_nn, new_data = values)
+```
+
+### Surface plot
+```{r}
+values$Prediction <- reg_predictions_easy$.pred
+
+ggplot(values, aes(x = R, y = G, fill = Prediction)) +
+  geom_raster() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(x = "R (Red)", y = "G (Green)", fill = "Predicted Value (Logit-transformed)") +
+  ggtitle("Surface Plot for Easiest combination (gray,light)") +
+  theme_minimal()
+```
+
+```{r}
+values$Saturation <- "shaded"
+values$Lightness <- "dark"
+```
+
+```{r}
+reg_predictions_hard <- predict(final_nn, new_data = values)
+```
+
+```{r}
+values$Prediction <- reg_predictions_hard$.pred
+
+ggplot(values, aes(x = R, y = G, fill = Prediction)) +
+  geom_raster() +
+  scale_fill_gradient(low = "blue", high = "red") +
+  labs(x = "R (Red)", y = "G (Green)", fill = "Predicted Value (Logit-transformed)") +
+  ggtitle("Surface Plot for Hardest combination (shaded,dark)") +
+  theme_minimal()
+```
+
+From the plot they look pretty similar

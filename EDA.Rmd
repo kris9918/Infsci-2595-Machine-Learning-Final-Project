@@ -1,0 +1,406 @@
+---
+title: "2595FinalProject_EDA"
+author: "Kuanyu Lai"
+date: "2024-03-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+```{r, message=FALSE}
+library(tidyverse)
+library(dataMaid)
+library(ggpubr)
+library(gridExtra)
+```
+
+```{r}
+df <- readr::read_csv("paint_project_train_data.csv", col_names = TRUE)
+df %>% glimpse()
+```
+
+### Logit Transform
+```{r}
+dfii <- df %>% 
+  mutate(y = boot::logit( (response - 0) / (100 - 0) ) ) %>% 
+  select(R, G, B, 
+         Lightness, Saturation, Hue,
+         y,outcome) |> 
+  mutate(
+    Lightness = factor(Lightness, ordered = FALSE),
+    Saturation = factor(Saturation, ordered = FALSE),
+    outcome = factor(outcome, ordered = FALSE))
+
+dfii %>% glimpse()
+```
+
+
+```{r}
+summary(dfii)
+```
+
+```{r}
+ldfii <- 
+  dfii %>% 
+  tibble::rowid_to_column() %>% 
+  pivot_longer(c(R, G,B,Hue))
+
+ldfii %>% glimpse()
+```
+
+
+```{r}
+ggplot(data=dfii, aes(x=y)) + 
+  geom_histogram(fill="red4", color="white") + 
+  ggtitle("Distribution of y") +
+  ylab("Frequency")
+```
+
+## EDA On Continuous Variables
+```{r}
+ggplot(data=dfii, aes(x=R)) + 
+  geom_histogram(fill="red4", color="white") + 
+  ggtitle("Distribution of R") +
+  ylab("Frequency")
+```
+
+
+```{r}
+R1 <-ggplot(data=dfii, aes(x=R, color=Lightness, fill=Lightness)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of R") +
+  ylab("Frequency") 
+
+R2 <- ggplot(data=dfii, aes(x=R, color=Saturation, fill=Saturation)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of R") +
+  ylab("Frequency")
+
+ggarrange(R1, R2,nrow = 2)
+```
+
+
+```{r}
+ggplot(data=dfii, aes(x=G)) + 
+  geom_histogram(fill="green4", color="white") + 
+  ggtitle("Distribution of G") +
+  ylab("Frequency")
+```
+
+
+```{r}
+G1 <-ggplot(data=dfii, aes(x=G, color=Lightness, fill=Lightness)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of lightness in G") +
+  ylab("Frequency") 
+
+G2 <- ggplot(data=dfii, aes(x=G, color=Saturation, fill=Saturation)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of Saturation G") +
+  ylab("Frequency")
+
+ggarrange(G1, G2, nrow = 2)
+```
+
+
+```{r}
+ggplot(data=dfii, aes(x=B)) + 
+  geom_histogram(fill="lightblue", color="white") + 
+  ggtitle("Distribution of B") +
+  ylab("Frequency")
+```
+
+
+```{r}
+B1 <-ggplot(data=dfii, aes(x=B, color=Lightness, fill=Lightness)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of lightness in B") +
+  ylab("Frequency") 
+
+B2 <- ggplot(data=dfii, aes(x=B, color=Saturation, fill=Saturation)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of Saturation B") +
+  ylab("Frequency")
+
+ggarrange(B1, B2, nrow = 2)
+```
+
+
+```{r}
+Hue1 <-ggplot(data=dfii, aes(x=Hue, color=Lightness, fill=Lightness)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of lightness in Hue") +
+  ylab("Frequency") 
+
+Hue2 <- ggplot(data=dfii, aes(x=Hue, color=Saturation, fill=Saturation)) + 
+  geom_density(alpha=0.2) + 
+  ggtitle("Distribution of Saturation Hue") +
+  ylab("Frequency")
+
+ggarrange(Hue1, Hue2, nrow = 2)
+```
+
+From the graph we can see that saturation are basically have the same distribution across three colors, but the lightness are pretty different. And non of the predictors are normally distributed, but 
+ 
+## Relationship between Continuous Variables and outcome 
+
+```{r}
+library(GGally)
+ggpairs(dfii, columns = c("R","G","B","Hue","y"))
+```
+
+From the plot we can see that the logit-transformed response is highly correlated with all continuous variables, while g and B seems correlated.
+
+## For continuous variables with binary outcome
+
+```{r}
+ggpairs(dfii, columns = c("R","G","B","Hue"),aes(color = outcome, alpha = 0.5))
+```
+
+
+```{r}
+scatter_with_smooth_RGB <- 
+  ggplot(ldfii, aes(x = value, y = as.numeric(outcome)-1)) +
+  geom_jitter(height = 0.05, width = 0, color = "darkblue", alpha = 0.7) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), formula = y ~ x, color = "red") +
+  labs(title = "Binary Outcome vs Continuous Inputs with Logistic Regression Smoother", x = "Continuous Input Value", y = "Binary Outcome") +
+  facet_wrap(~ name, scales = "free")
+
+scatter_with_smooth_RGB
+
+```
+
+```{r}
+scatter_smooth_with_interaction_sat <- 
+  ggplot(ldfii, aes(x = value, y = as.numeric(outcome)-1, color = Saturation)) +
+  geom_jitter(height = 0.02, width = 0, aes(color = Saturation), alpha = 0.7) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), formula = y ~ x, aes(fill = Saturation, color = Saturation)) +
+  labs(title = "Binary Outcome vs Continuous Inputs Interacting with Saturation", x = "Continuous Input Value", y = "Binary Outcome") +
+  facet_wrap(~ name, scales = "free")
+
+scatter_smooth_with_interaction_sat
+```
+```{r}
+scatter_smooth_with_interaction_light <- 
+  ggplot(ldfii, aes(x = value, y = as.numeric(outcome)-1, color = Lightness)) +
+  geom_jitter(height = 0.02, width = 0, aes(color = Lightness), alpha = 0.7) +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), formula = y ~ x, aes(fill = Lightness, color = Lightness)) +
+  labs(title = "Binary Outcome vs Continuous Inputs interacting with Lightness", x = "Continuous Input Value", y = "Binary Outcome") +
+  facet_wrap(~ name, scales = "free")
+
+scatter_smooth_with_interaction_light
+```
+
+
+## Categorical data
+
+```{r}
+sat_bar <- ggplot(dfii, aes(x = Saturation)) +
+  geom_bar(fill = "skyblue", color = "black", width = 0.7) +  
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -0.5) + 
+  labs(
+    x = "Saturation",  
+    y = "Count",  
+    title = "Count of Saturation", 
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 15, face = "bold"), 
+    axis.title = element_text(size = 14),  
+    axis.text = element_text(size = 12), 
+    legend.position = "none" 
+  )
+sat_bar
+```
+```{r}
+bar_Sat_with_outcome <- ggplot(dfii, aes(x = Saturation, fill = as.factor(outcome))) +
+  geom_bar(position = "dodge", color = "black") +
+  labs(title = "Impact of Saturation on Binary Outcome", x = "Saturation", y = "Count", fill = "y") +
+  scale_fill_manual(values = c("0" = "lightblue", "1" = "salmon"))
+
+bar_Sat_with_outcome
+```
+
+
+
+```{r}
+light_bar <- ggplot(dfii, aes(x = Lightness)) +
+  geom_bar(fill = "springgreen2", color = "black", width = 0.7) +  
+  geom_text(stat = 'count', aes(label = ..count..), vjust = -0.5) + 
+  labs(
+    x = "Lightness",  
+    y = "Count",  
+    title = "Count of Lightness", 
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 15, face = "bold"), 
+    axis.title = element_text(size = 14),  
+    axis.text = element_text(size = 12), 
+    legend.position = "none" 
+  )
+light_bar
+```
+
+```{r}
+bar_light_with_outcome <- ggplot(dfii, aes(x = Lightness, fill = as.factor(outcome))) +
+  geom_bar(position = "dodge", color = "black") +
+  labs(title = "Impact of Lightness on Binary Outcome", x = "Lightness", y = "Count", fill = "y") +
+  scale_fill_manual(values = c("0" = "lightblue", "1" = "salmon"))
+
+bar_light_with_outcome
+```
+
+
+## Condition (group) the continuous variables based on the categorical variables
+```{r}
+boxplot_cat_Sat <- ggplot(ldfii, aes(x = Saturation, y = value)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Distribution of Continuous Inputs by Saturation", x = "Saturation", y = "Value") +
+  facet_wrap(~ name, scales = "free_y")
+
+boxplot_cat_Sat
+```
+
+```{r}
+boxplot_cat_light <- ggplot(ldfii, aes(x = Lightness, y = value)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Distribution of Continuous Inputs by Saturation", x = "Saturation", y = "Value") +
+  facet_wrap(~ name, scales = "free_y")
+
+boxplot_cat_light
+```
+
+
+## Continuous output with continuous inpit interacting with categorical input
+
+```{r fig.width = 8}
+plot_list1 <- list()
+continuous_vars <- c("R", "G", "B")
+for (var in continuous_vars) {
+  # Plot the data
+  plot <- ggplot(dfii, aes_string(x = var, y = "y", color = "Saturation", group = "Saturation")) +
+    geom_smooth() +
+    labs(title = paste("Plot of", var,"by Saturation"))
+  plot_list1[[var]] <- plot
+}
+
+ggpubr::ggarrange(plot_list1$R,plot_list1$G,plot_list1$B, ncol = 3,widths = c(1, 1, 1),common.legend = TRUE)
+```
+```{r}
+plot_list2 <- list()
+for (var in continuous_vars) {
+  plot <- ggplot(dfii, aes_string(x = var, y = "y", color = "Lightness", group = "Lightness")) +
+    geom_smooth() +
+    labs(title = paste("Plot of", var,"by Lightness"))
+  plot_list2[[var]] <- plot
+}
+ggpubr::ggarrange(plot_list2$R,plot_list2$G,plot_list2$B, ncol = 3,widths = c(1, 1, 1),common.legend = TRUE)
+```
+
+
+
+
+## Visualize categorical with Continuous Response
+
+```{r}
+class_summary_sat <- dfii %>% 
+  group_by(Saturation) %>% 
+  summarise(
+    n = n(),
+    mean = mean(y),
+    `standard deviation` = sd(y),
+    min = min(y),
+    max = max(y)
+  ) |>
+  print()
+```
+
+
+```{r}
+dfii %>% 
+  ggplot(aes(x = Saturation, y = y, fill= Saturation)) +
+    geom_violin(alpha = 0.5) +
+    geom_jitter(aes(fill = "black"), width = 0.20, size = 1) +
+    geom_segment(
+      aes(x = c(0.75, 1.75,2.75,3.75,4.75,5.75,6.75), y= mean, xend = c(1.25, 2.25,3.25,4.25,5.25,6.25,7.25), yend = mean, col = Saturation), 
+      size = 1.5, data = class_summary_sat
+    ) +
+    scale_x_discrete("Saturation") +
+    scale_y_continuous("y") +
+    theme_classic() +
+    theme(legend.position = "none", axis.text.x = element_text(size = 12))
+```
+
+
+```{r}
+class_summary_light <- dfii %>% 
+  group_by(Lightness) %>% 
+  summarise(
+    n = n(),
+    mean = mean(y),
+    `standard deviation` = sd(y),
+    min = min(y),
+    max = max(y)
+  ) |>
+  print()
+```
+
+
+```{r}
+dfii %>% 
+  ggplot(aes(x = Lightness, y = y, fill = Lightness)) +
+    geom_violin(alpha = 0.5) +
+    geom_jitter(aes(col = Lightness), width = 0.20, size = 0.5) +
+    geom_segment(
+      aes(x = c(0.75, 1.75,2.75,3.75,4.75,5.75,6.75), y= mean, xend = c(1.25, 2.25,3.25,4.25,5.25,6.25,7.25), yend = mean, col = Lightness), 
+      size = 1.5, data = class_summary_light
+    ) +
+    scale_x_discrete("Lightness") +
+    scale_y_continuous("y") +
+    theme_classic() +
+    theme(legend.position = "none", axis.text.x = element_text(size = 12))
+```
+
+## Visualize categorical with Binary Response
+
+```{r}
+conditional_plots <- list()
+for (cat_var in c("Saturation", "Lightness")) {
+    plot <- ggplot(dfii, aes(x = !!sym(cat_var), fill = outcome)) +
+      geom_bar(position="fill") +  
+      labs(
+        y = cat_var, 
+        title = paste("Stacked bar chart  of", cat_var, "by outcome"), 
+      ) +
+      theme_minimal() + 
+      theme(
+        plot.title = element_text(size = 18, face = "bold"),  
+        axis.title = element_text(size = 14),  
+        axis.text = element_text(size = 12)  
+      )
+    conditional_plots[[paste(cat_var, sep = "_")]] <- plot
+  }
+
+
+for (plot_name in names(conditional_plots)) {
+  print(conditional_plots[[plot_name]])
+}
+```
+```{r}
+write.csv(dfii, "dfii.csv")
+```
+
+## Conclusion
+
+Continuous variables:
+
+From the exploratory analysis we did above, we can see that our logit response for continuous response is left skewed, also for our main continuous variable R,G and B, they're also left skewed, so for linear model, there might have some trouble doing inference because of the assumption of normality, but generally they are quite robust to violation and our main task for this project is prediction and the coefficients of out linear model should be unbiased in this condition. 
+
+From the ggpairs plot we can see that the continuous response is highly correlated with variable G which suggest that G might be a important variable in predicting y, while G and B are also highly correlated with y(82 rsq), so all three continuous variables can be good predictors. As for binary outcome, when we plot the logistic lines, it seems like there is not a clear separable lines between event and non-event for all 4 continuous variables, so it might suggest that there is little relationship between them. But when we test for interaction between continuous variable and Saturation, we found that gray has a different trend line with other subcategory which suggest there might be a interaction between these variables. As for lightness, there seems to be the same across all subcategory, thus suggests no interaction.
+
+Categorical variables:
+
+Looking at the proportional of event and non-event in each subcategory of saturation, seems like gray and neutral has the highest event rate among other subcategory, which suggest there is high varaibility in saturation which might indicates a good predictor, while for lightness, there seems to be no difference among the sub-categories which suggest. For continuous response, there seems to be no interaction between categorical and continuous. 
